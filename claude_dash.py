@@ -480,7 +480,7 @@ def main(scr):
         sys.exit("claude-dash: in a popup pass the client: %s '#{client_name}' (see --help)" % sys.argv[0])
     # target by id: "-t NAME" is parsed as a window target and breaks on names with "." or ":"
     where = (["-c", arg] if arg.startswith("/dev/") else ["-t", arg]) if arg else ["-t", me] if me else []
-    session = sh("tmux", "display", "-p", *where, "#{session_id}").strip()
+    session, _, start_name = sh("tmux", "display", "-p", *where, "#{session_id}\t#{session_name}").strip().partition("\t")
     if not session:  # e.g. /usr/bin/tmux 2.7 first on PATH cannot talk to a 3.7b server
         sys.exit("claude-dash: 'tmux display' failed; tmux on PATH is %s" % shutil.which("tmux"))
     atexit.register(sh, "tmux", "set", "-t", session, "-u", "@claude_need")  # no stale badge after exit
@@ -532,7 +532,7 @@ def main(scr):
         if was_waiting is not None and waiting_now - was_waiting:
             curses.beep()
         was_waiting = waiting_now
-        name = everyone[0]["session"] if everyone else ""
+        name = everyone[0]["session"] if everyone else start_name  # rows carry renames; none yet: the start name
         foot = note or ("filter /%s   Esc clear" % query if query else "")
         counts = collections.Counter(r["status"] for r in everyone)
         err = poll.err or ("agents: " + agents.err if agents.err not in ("", "starting") else "")

@@ -21,6 +21,51 @@ An agent waiting on you gets a full-width red row, a red `N NEED YOU` badge appe
 
 It has no Python dependencies and needs no Claude Code hooks.
 
+## Install
+
+1. Clone the repo:
+
+   ```sh
+   git clone https://github.com/mdmanurung/lucid-dashboard ~/lucid-dashboard
+   ```
+
+2. Point the shebang at a Python 3.7 or later. Skip this step if `/usr/bin/python3.11` exists. Otherwise check `python3 --version`, then run:
+
+   ```sh
+   sed -i "1s|.*|#!$(command -v python3)|" ~/lucid-dashboard/claude_dash.py
+   ```
+
+3. Put it on your `PATH` as `claude-dash`:
+
+   ```sh
+   mkdir -p ~/.local/bin
+   ln -s ~/lucid-dashboard/claude_dash.py ~/.local/bin/claude-dash
+   ```
+
+4. Check that it runs and that Claude Code can list agents:
+
+   ```sh
+   claude-dash --help        # prints the keys
+   claude agents --json      # prints a JSON list; needs Claude Code 2.1.139 or later
+   ```
+
+5. Add key bindings to `~/.tmux.conf`. `prefix A` opens the dashboard window and `prefix G` opens a popup:
+
+   ```tmux
+   bind A new-window -S -n dash ~/lucid-dashboard/claude_dash.py
+   bind G run-shell 'tmux display-popup -c "#{client_name}" -E -w 90% -h 90% "$HOME/lucid-dashboard/claude_dash.py #{client_name}"'
+   ```
+
+   Pick other keys if `A` or `G` are taken; `tmux list-keys -T prefix` shows which ones are. Then reload:
+
+   ```sh
+   tmux source-file ~/.tmux.conf
+   ```
+
+6. Optional: add your own replies (see [Prefilled replies](#prefilled-replies)) and the status-bar theme (see [Status-bar badge and tmux theme](#status-bar-badge-and-tmux-theme)).
+
+To update, run `git -C ~/lucid-dashboard pull`; if you edited the shebang, first run `git -C ~/lucid-dashboard checkout claude_dash.py`. To uninstall, delete `~/.local/bin/claude-dash`, the two bindings and the clone.
+
 ## Run
 
 From inside the tmux session you want to watch:
