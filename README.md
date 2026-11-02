@@ -49,14 +49,14 @@ It has no Python dependencies and needs no Claude Code hooks.
    claude agents --json      # prints a JSON list; needs Claude Code 2.1.139 or later
    ```
 
-5. Add key bindings to `~/.tmux.conf`. `prefix A` opens the dashboard window and `prefix G` opens a popup:
+5. Add key bindings to `~/.tmux.conf`. `prefix A` toggles the dashboard window and `prefix Tab` jumps to the next agent that needs you:
 
    ```tmux
-   bind A new-window -S -n dash ~/lucid-dashboard/claude_dash.py
-   bind G run-shell 'tmux display-popup -c "#{client_name}" -E -w 90% -h 90% "$HOME/lucid-dashboard/claude_dash.py #{client_name}"'
+   bind A run-shell '~/lucid-dashboard/claude_dash.py --toggle #{window_id}'
+   bind Tab run-shell '~/lucid-dashboard/claude_dash.py --next #{pane_id}'
    ```
 
-   Pick other keys if `A` or `G` are taken; `tmux list-keys -T prefix` shows which ones are. Then reload:
+   Pick other keys if `A` or `Tab` are taken; `tmux list-keys -T prefix` shows which ones are. Then reload:
 
    ```sh
    tmux source-file ~/.tmux.conf
@@ -74,19 +74,24 @@ From inside the tmux session you want to watch:
 tmux new-window -S -n dash /path/to/claude_dash.py
 ```
 
-`-S` jumps to an existing `dash` window instead of opening a second dashboard. It also works as a split pane:
+`-S` jumps to an existing `dash` window instead of opening a second dashboard. A window named `dash` always moves itself to the front, so it is window 1 with `base-index 1`. It also works as a split pane:
 
 ```sh
 tmux split-window -h -l 45% /path/to/claude_dash.py
 ```
 
-To open it as a popup, add this to `~/.tmux.conf`. The popup closes after `Enter` jumps to an agent.
+`claude_dash.py --help` also shows how to open it as a popup, but `prefix A` does the same job.
 
-```tmux
-bind G run-shell 'tmux display-popup -c "#{client_name}" -E -w 90% -h 90% "/path/to/claude_dash.py #{client_name}"'
-```
+## Toggle with prefix A, jump with prefix Tab
 
-A popup has no pane of its own, so the binding passes the client name. `display-popup` does not expand `#{...}` formats but `run-shell` does, which is why the binding goes through `run-shell`.
+`prefix A` works like a NERDTree toggle, from any window in the session:
+
+- From a Claude window, it goes to the dashboard. It opens the dashboard as the first window if there is none.
+- From the dashboard, it goes back to the window you came from.
+
+So after `Enter` jumps to an agent, `prefix A` brings you back to the dashboard. A second `prefix A` returns to that agent. If the `dash` window was moved, the toggle moves it back to the front. After each jump, the tmux status line shows the key that brings you back for 2.5 s.
+
+`prefix Tab` skips the dashboard: from any pane, it jumps to the next agent that needs you, waiting agents first, then idle ones. Press it again for the one after. It reads the session option `@claude_queue`, which only a running dashboard keeps current.
 
 ## Keys
 
