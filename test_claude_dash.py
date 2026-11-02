@@ -34,3 +34,14 @@ assert next_needing(st("waiting", "idle", "busy", "busy"), 1) == 0       # wraps
 assert next_needing(st("busy", "busy"), 1) == 1                         # nobody needs you: stay
 assert next_needing(st("idle"), 0) == 0                                 # only itself
 print("ok next")
+
+from claude_dash import BOX_LINES, box_body, ctx
+assert ctx("x\n  ViralScan (main) | Opus 5.5 (medium) | ctx: 20%\n") == 20    # the status-line value
+assert ctx("ctx: 9%\n...\nctx: 81%") == 81                                    # the newest one wins
+assert ctx("no status line") is None
+one = box_body(dict(buf="hi"), 40)
+assert one == ["❯ hi█"]                                                        # cursor at the end
+many = box_body(dict(buf="\n".join("l%d" % i for i in range(6))), 40)
+assert len(many) == BOX_LINES and many[0].startswith("… ") and many[-1] == "  l5█"   # older lines scroll out
+assert box_body(dict(buf="x" * 50), 10)[0].startswith("…")                   # long line keeps its end
+print("ok box")

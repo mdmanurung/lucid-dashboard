@@ -11,19 +11,25 @@ run-shell cannot host it (no tty).
 
 Keys
     j/k, arrows   select agent          Enter   jump to its pane
-    i             reply (shows its screen) 0-9 y n answer a waiting prompt
+    i             reply in a box (Alt-Enter or a paste adds lines) 0-9 y n answer a waiting prompt
     I             message every listed agent (filter first to pick a group)
+    r / R         quick reply (QUICK_REPLIES below) to the selected / every listed agent
     Space         Enter on a waiting prompt
     e             send Esc (interrupt)  N       new claude window
     X             kill pane (asks)      q       quit
     /             filter: type words, Enter jumps to the top match, Esc clears
     Tab           select the next agent that needs you (waiting first, then idle)
+
+While it runs, the session option @claude_need holds how many agents wait on you, for the tmux
+status bar: #{?@claude_need,#{@claude_need} NEED YOU,} (tmux-modern.conf shows it as a red badge).
 """
+import atexit
 import collections
 import curses
 import json
 import shutil
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -31,7 +37,10 @@ import time
 
 RANK = {"waiting": 0, "?": 1, "idle": 2, "shell": 3, "busy": 3}
 LABEL = {"waiting": "NEEDS YOU", "idle": "● idle", "busy": "◐ busy", "shell": "◌ shell", "?": "○ ?"}
-KEYS = [("Tab", "next"), ("i", "reply"), ("I", "all"), ("/", "filter"), ("0-9 y n ␣", "answer"),
+# r / R then a number sends one of these; edit to taste (at most 9)
+QUICK_REPLIES = ["continue", "yes, go ahead", "run the tests and report what fails",
+                 "commit this with a clear message", "stop and summarise where you are and what is left"]
+KEYS = [("Tab", "next"), ("i", "reply"), ("I", "all"), ("r", "quick"), ("/", "filter"), ("0-9 y n ␣", "answer"),
         ("e", "esc"), ("⏎", "jump"), ("N", "new"), ("X", "kill"), ("q", "quit")]
 # Tokyo Night as xterm-256 numbers: name -> (fg, bg, 8-colour fg, 8-colour bg); -1 = terminal default
 PALETTE = {
@@ -48,10 +57,13 @@ PALETTE = {
     "pill_busy": (252, 238, curses.COLOR_BLACK, curses.COLOR_WHITE),
     "pill_warn": (234, 179, curses.COLOR_BLACK, curses.COLOR_YELLOW),
     "input": (231, 237, curses.COLOR_BLACK, curses.COLOR_WHITE),     # message box field
+    "hot": (210, -1, curses.COLOR_RED, -1),                          # context nearly full
 }
-EDIT_KEYS = [("⏎", "send"), ("Esc", "cancel"), ("Ctrl-U", "clear")]
+EDIT_KEYS = [("⏎", "send"), ("Alt-⏎", "new line"), ("Esc", "cancel"), ("Ctrl-U", "clear")]
+QUICK_KEYS = [("1-%d" % len(QUICK_REPLIES), "send"), ("Esc", "cancel")]
+BOX_LINES = 4  # message lines shown in the box; older lines scroll out of view
 COL = {}  # name -> curses attribute, filled once curses has started
-SEEN = {}  # pane id -> (time read, progress line)
+SEEN = {}  # pane id -> (time read, progress line, context %)
 
 
 def sh(*args):
@@ -129,6 +141,12 @@ def progress(screen):
     return steps[-1] if steps else ""
 
 
+def ctx(screen):
+    """Context use from a status line like "| ctx: 20%" (the last one on screen); None if absent."""
+    found = re.findall(r"ctx:\s*(\d+)%", screen)
+    return int(found[-1]) if found else None
+
+
 class Poller(threading.Thread):
     """All tmux reads happen here, so a keypress never waits on a subprocess.
     The UI sets .want to the selected pane and calls .wake.set() for an immediate refresh."""
@@ -139,7 +157,7 @@ class Poller(threading.Thread):
     def __init__(self, session, me, agents):
         super().__init__()
         self.session, self.me, self.agents = session, me, agents
-        self.want, self.wake = None, threading.Event()
+        self.want, self.wake, self.need = None, threading.Event(), None
 
     def run(self):
         while True:
@@ -149,6 +167,11 @@ class Poller(threading.Thread):
                 lines = sh("tmux", "capture-pane", "-p", "-t", want).rstrip("\n").splitlines()
                 self.preview = (want, lines)
             self.rows = panes(self.session, self.me, self.agents.rows)
+            need = sum(r["status"] == "waiting" for r in self.rows)
+            if need != self.need:  # status-bar badge; unset at 0 so #{?@claude_need,...} is false
+                # ponytail: one dashboard per session; a second one's exit clears the badge until next change
+                sh("tmux", "set", "-t", self.session, *(["@claude_need", str(need)] if need else ["-u", "@claude_need"]))
+                self.need = need
             self.wake.wait(0.5)
 
 
@@ -169,12 +192,13 @@ def panes(session, me, agents):
     out = [r for r in rows.values() if r.get("agent") or r["cmd"] == "claude"]
     # re-read a screen when its progress is over 3 s old, oldest first and at most 2 per tick, so
     # no tick stalls on all of them (the first tick reads all); -J keeps a wrapped line whole
-    read_at = lambda r: SEEN.get(r["id"], (0, ""))[0]
+    read_at = lambda r: SEEN.get(r["id"], (0,))[0]
     stale = sorted((r for r in out if time.time() - read_at(r) > 3), key=read_at)
     for r in stale if not SEEN else stale[:2]:
-        SEEN[r["id"]] = (time.time(), progress(sh("tmux", "capture-pane", "-p", "-J", "-t", r["id"])))
+        screen = sh("tmux", "capture-pane", "-p", "-J", "-t", r["id"])
+        SEEN[r["id"]] = (time.time(), progress(screen), ctx(screen))
     for r in out:
-        r["progress"] = SEEN.get(r["id"], (0, ""))[1]
+        _, r["progress"], r["ctx"] = SEEN.get(r["id"], (0, "", None))
     return sorted(out, key=lambda r: (RANK.get(r["status"], 1),
                                       tuple(int(n) for n in r["target"].split("."))))
 
@@ -192,11 +216,48 @@ def matches(query, r):
 
 
 def send_text(pane, text):
-    if text.endswith(";"):  # tmux reads a trailing ";" as a command separator
-        text = text[:-1] + "\\;"
-    sh("tmux", "send-keys", "-t", pane, "-l", "--", text)
+    if "\n" in text:  # paste as one block: a typed newline would submit the first line alone
+        subprocess.run(["tmux", "load-buffer", "-b", "claude-dash", "-"], input=text, text=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+        sh("tmux", "paste-buffer", "-p", "-d", "-b", "claude-dash", "-t", pane)
+    else:
+        if text.endswith(";"):  # tmux reads a trailing ";" as a command separator
+            text = text[:-1] + "\\;"
+        sh("tmux", "send-keys", "-t", pane, "-l", "--", text)
     time.sleep(0.1)  # one call with Enter reads as a paste and Claude Code does not submit
     sh("tmux", "send-keys", "-t", pane, "Enter")
+
+
+def escape(scr):
+    """After Esc, read what came with it: "alt-enter", "paste-start", "paste-end", or "" for a lone Esc."""
+    scr.nodelay(True)
+    try:
+        nxt = scr.get_wch()
+        if nxt in ("\n", "\r"):
+            return "alt-enter"
+        if nxt == "[":  # bracketed paste wraps pasted text in ESC[200~ ... ESC[201~
+            seq = ""
+            while len(seq) < 8 and seq[-1:] != "~":
+                seq += scr.get_wch()
+            return {"200~": "paste-start", "201~": "paste-end"}.get(seq, "")
+        curses.unget_wch(nxt) if isinstance(nxt, str) else curses.ungetch(nxt)  # Esc, then a key
+        return ""
+    except curses.error:  # nothing followed: a lone Esc
+        return ""
+    finally:
+        scr.timeout(150)
+
+
+def box_body(edit, room):
+    """Lines inside the message box: the quick-reply menu, or the last BOX_LINES of the message."""
+    if edit.get("quick"):
+        return ["%d  %s" % (i, q) for i, q in enumerate(QUICK_REPLIES, 1)]
+    lines = edit["buf"].split("\n")
+    shown = lines[-BOX_LINES:]
+    out = [("❯ " if j == 0 and len(lines) <= BOX_LINES else "… " if j == 0 else "  ") + l
+           for j, l in enumerate(shown)]
+    out[-1] += "█"
+    return [l if len(l) <= room else "…" + l[-(room - 1):] for l in out]  # keep the typing end in view
 
 
 def ask(scr, prompt):
@@ -255,28 +316,33 @@ def draw(scr, name, rows, sel, note, err, counts, edit, preview):
         put(scr, 0, max(x, w - 28), " agents unavailable: %s " % err[:10], c["pill_warn"])
 
     nw = min(max([len(r["name"] or r["window"]) for r in rows] + [5]), 26, max(8, w // 4))
-    put(scr, 2, 0, "  %-6s%-12s%-5s%-*s  %s" % ("WIN", "STATE", "FOR", nw, "AGENT", "PROGRESS"), c["dim"])
+    put(scr, 2, 0, "  %-6s%-12s%-5s%-5s%-*s  %s" % ("WIN", "STATE", "FOR", "CTX", nw, "AGENT", "PROGRESS"),
+        c["dim"])
     shown = max(1, min(len(rows), (h - 6) // 2))  # list takes at most half; the preview the rest
     off = min(max(0, sel - shown + 1), max(0, len(rows) - shown))
     for i, r in enumerate(rows[off:off + shown], off):
         y, st, here = 3 + i - off, r["status"], i == sel
         label = LABEL.get(st, st)
         agent = (r["name"] or r["window"])[:nw]
+        used = "" if r.get("ctx") is None else "%d%%" % r["ctx"]
         if st == "waiting":  # one solid red bar, full width
-            text = "%s %-6s%-12s%-5s%-*s  %s · %s" % ("▌" if here else " ", r["target"], label,
-                                                    age(r["since"]), nw, agent, r["waiting"], r["progress"])
+            text = "%s %-6s%-12s%-5s%-5s%-*s  %s · %s" % ("▌" if here else " ", r["target"], label, age(r["since"]),
+                                                        used, nw, agent, r["waiting"], r["progress"])
             put(scr, y, 0, text.ljust(w), c["alert_sel" if here else "alert"] | B)
             continue
         x = put(scr, y, 0, "▌ " if here else "  ", c["accent"] | B)
         x = put(scr, y, x, "%-6s" % r["target"], c["dim"])
         x = put(scr, y, x, "%-12s" % label, c.get(st, c["unknown"]) | (B if st == "idle" else 0))
         x = put(scr, y, x, "%-5s" % age(r["since"]), c["dim"])
+        hot = c["hot"] | B if (r.get("ctx") or 0) >= 80 else c["busy"] if (r.get("ctx") or 0) >= 60 else c["dim"]
+        x = put(scr, y, x, "%-5s" % used, hot)
         x = put(scr, y, x, "%-*s  " % (nw, agent), B if here else 0)
         put(scr, y, x, r["progress"], 0 if here else c["dim"])
 
     # preview of the selected agent's screen
     top = shown + 4
-    foot_rows = 4 if edit else 1  # the message box takes 3 rows plus its hint row
+    body = box_body(edit, w - 6) if edit else []
+    foot_rows = len(body) + 3 if edit else 1  # the box: border, its lines, border, then a hint row
     if rows and h - top - foot_rows > 2:
         r = rows[sel]
         put(scr, top, 0, "─" * w, c["dim"])
@@ -287,16 +353,14 @@ def draw(scr, name, rows, sel, note, err, counts, edit, preview):
 
     # footer: a boxed message field with its keys on their own row, a notice, or the key hints
     if edit:
-        title = " %s " % edit["title"]
-        put(scr, h - 4, 0, "╭─" + title + "─" * max(0, w - 4 - len(title)) + "╮", c["accent"])
-        field = " ❯ " + edit["buf"]
-        room = w - 4
-        field = field if len(field) < room else " …" + field[-(room - 3):]  # keep where you type in view
-        put(scr, h - 3, 0, "│", c["accent"])
-        put(scr, h - 3, 1, (field + "█").ljust(w - 2), c["input"] | B)
-        put(scr, h - 3, w - 2, "│", c["accent"])
+        y0, title = h - len(body) - 3, " %s " % edit["title"]
+        put(scr, y0, 0, "╭─" + title + "─" * max(0, w - 4 - len(title)) + "╮", c["accent"])
+        for j, line in enumerate(body, y0 + 1):
+            put(scr, j, 0, "│", c["accent"])
+            put(scr, j, 1, (" " + line).ljust(w - 3), c["input"] | B)
+            put(scr, j, w - 2, "│", c["accent"])
         put(scr, h - 2, 0, "╰" + "─" * (w - 3) + "╯", c["accent"])
-        hints(scr, h - 1, EDIT_KEYS)
+        hints(scr, h - 1, QUICK_KEYS if edit.get("quick") else EDIT_KEYS)
     elif note:
         put(scr, h - 1, put(scr, h - 1, 0, " ● ", c["busy"] | B), note, c["busy"])
     else:
@@ -320,12 +384,27 @@ def main(scr):
     session = sh("tmux", "display", "-p", *where, "#{session_id}").strip()
     if not session:  # e.g. /usr/bin/tmux 2.7 first on PATH cannot talk to a 3.7b server
         sys.exit("claude-dash: 'tmux display' failed; tmux on PATH is %s" % shutil.which("tmux"))
+    atexit.register(sh, "tmux", "set", "-t", session, "-u", "@claude_need")  # no stale badge after exit
+    sys.stdout.write("\033[?2004h")  # bracketed paste: a pasted newline must not send the message
+    sys.stdout.flush()
+    atexit.register(lambda: (sys.stdout.write("\033[?2004l"), sys.stdout.flush()))
     agents = Agents()
     agents.start()
     poll = Poller(session, me, agents)
     poll.start()
     sel, sel_id, note, was_waiting = 0, None, "", None
     query, edit = "", None  # edit: footer line editor; edit["to"] is None for the filter
+
+    def deliver(text, to):
+        """Send text to panes `to`; skip any now waiting, as Enter would accept its dialog."""
+        now = poll.rows
+        skipped = [r["target"] for r in now if r["id"] in to and r["status"] == "waiting"]
+        live = [r["id"] for r in now if r["id"] in to and r["status"] != "waiting"]
+        for pane in live:
+            send_text(pane, text)
+        return "sent to %d agent%s" % (len(live), "" if len(live) == 1 else "s") + (
+            "; skipped waiting %s" % " ".join(skipped) if skipped else "")
+
     while True:
         if edit and edit["to"] is None:
             query = edit["buf"]
@@ -354,9 +433,34 @@ def main(scr):
         note = ""
         ch = k if isinstance(k, str) else ""
         code = ord(k) if ch else k
+        kind = escape(scr) if code == 27 else ""
+        if kind == "paste-start":  # a paste outside the box opens a reply to the selected agent
+            if not edit and rows:
+                edit = dict(title="reply to %s · %s" % (rows[sel]["target"], rows[sel]["name"] or rows[sel]["window"]),
+                            buf="", to=[rows[sel]["id"]])
+            if edit:
+                edit["pasting"] = True
+            continue
+        if kind == "paste-end":
+            if edit:
+                edit["pasting"] = False
+            continue
+        if kind == "alt-enter":
+            if edit and edit["to"] is not None and not edit.get("quick"):
+                edit["buf"] += "\n"
+            continue
+        if edit and edit.get("quick"):
+            if code == 27:
+                edit = None
+            elif ch in "123456789" and ch and int(ch) <= len(QUICK_REPLIES):
+                note, edit = deliver(QUICK_REPLIES[int(ch) - 1], edit["to"]), None
+            continue
         if edit and code not in (curses.KEY_UP, curses.KEY_DOWN):
             enter = code in (10, 13, curses.KEY_ENTER)
             filtering = edit["to"] is None
+            if enter and edit.get("pasting"):  # newline inside a paste: keep it, do not send
+                edit["buf"] += " " if filtering else "\n"
+                continue
             if code == 27:  # Esc cancels; on the filter it also clears it
                 query = "" if filtering else query
                 edit = None
@@ -365,18 +469,13 @@ def main(scr):
             elif code == 21:  # Ctrl-U
                 edit["buf"] = ""
             elif enter and not filtering:
-                text, to = edit["buf"].strip(), edit["to"]
-                # an agent that opened a dialog while you typed would take Enter as "accept"
-                busy_dialog = [r["target"] for r in everyone if r["id"] in to and r["status"] == "waiting"]
-                live = [r["id"] for r in everyone if r["id"] in to and r["status"] != "waiting"]
-                for pane in live if text else []:
-                    send_text(pane, text)
-                note = ("sent to %d agent%s" % (len(live), "" if len(live) == 1 else "s") if text
-                        else "not sent: empty message")
-                note += "; skipped waiting %s" % " ".join(busy_dialog) if text and busy_dialog else ""
+                text = edit["buf"].strip()
+                note = deliver(text, edit["to"]) if text else "not sent: empty message"
                 edit = None
             elif enter:
                 edit = None  # filter stays on; Enter falls through and jumps to the top match
+            elif ch == "\t":
+                edit["buf"] += "    "
             elif ch.isprintable():
                 edit["buf"] += ch
             if not (enter and filtering):
@@ -405,6 +504,10 @@ def main(scr):
         if ch == "I" and rows:  # every listed agent; waiting ones are skipped at send time
             edit = dict(title="message all %d listed agents" % len(rows), buf="", to=[r["id"] for r in rows])
             continue
+        if ch == "R" and rows:
+            edit = dict(title="quick reply to all %d listed agents" % len(rows), buf="",
+                        to=[r["id"] for r in rows], quick=True)
+            continue
         if not rows:
             continue
         r = rows[sel]
@@ -414,8 +517,11 @@ def main(scr):
             sh("tmux", "select-pane", "-t", r["id"])
             if popup:  # leave, so the popup closes and the jump is visible
                 return
-        elif ch == "i" and waiting:
+        elif ch in ("i", "r") and waiting:
             note = "%s is waiting on a dialog: answer with 0-9/y/n/Space first" % r["target"]
+        elif ch == "r":
+            edit = dict(title="quick reply to %s · %s" % (r["target"], r["name"] or r["window"]), buf="",
+                        to=[r["id"]], quick=True)
         elif ch == "i":  # typed in the footer, so its screen stays visible in the preview
             edit = dict(title="reply to %s · %s" % (r["target"], r["name"] or r["window"]), buf="", to=[r["id"]])
         elif ch and ch in "0123456789yn " and not waiting:
