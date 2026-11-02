@@ -2,16 +2,7 @@
 
 A tmux dashboard for Claude Code. You run it in one pane, and it lists every Claude Code agent in the same tmux session. For each one it shows the live status, how long it has been in that state, its context use and its latest step. From the dashboard you can reply, answer prompts, jump to an agent, spawn one or kill one, so you never have to click through panes one at a time.
 
-```
- ◆ claude-dash   0 · 10 agents   1 NEED YOU   1 idle   8 busy
-  WIN   STATE       FOR  CTX  AGENT                       PROGRESS
-  5.1   NEEDS YOU   1m   24%  annplyr-ergonomics          permission prompt · Bash(Rscript check.R)
-  9.1   ● idle      24s  26%  mycelium-extra-59           All three changes are on main and pass…
-▌ 1.1   ◐ busy      5m   25%  fix-adversarial-review-fin  Land #154, #155, #153, #151 in order
-── 1.1 · fix-adversarial-review-findings · ~/ViralScan ─────────────────────
- (live preview of the selected agent's screen)
- Tab next   i reply   I all   r quick   / filter   0-9 y n ␣ answer   ⏎ jump   N new   X kill   q quit
-```
+![claude-dash watching five agents: one waits on a permission prompt (red row), one is idle, three are busy, with a live preview of the selected agent](docs/screenshot.svg)
 
 An agent waiting on you gets a full-width red row, a red `N NEED YOU` badge appears in the header, and the terminal bell rings.
 
