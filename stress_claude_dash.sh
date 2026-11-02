@@ -41,6 +41,12 @@ D=$(dash "$SID" "")
 
 until_screen "$S · 3 agents" "3 fake agents not listed under the dotted session name"
 until_screen "3 idle" "fake agents not idle"
+# prefix Tab (--next): through run-shell, from an agent to the next in the dashboard's queue, and on
+read -r q1 q2 q3 <<< "$(tmux show -t "$SID" -v @claude_queue)"
+[ -n "$q3" ] || fail "@claude_queue does not list the 3 idle agents"
+active_pane() { tmux display -p -t "$SID:" '#{pane_id}'; }
+tmux run-shell -t "$q1" "$DASH --next #{pane_id}"; [ "$(active_pane)" = "$q2" ] || fail "--next from $q1 did not reach $q2"
+tmux run-shell -t "$D" "$DASH --next #{pane_id}"; [ "$(active_pane)" = "$q1" ] || fail "--next from the dashboard did not reach $q1"
 tmux send-keys -t "$D" j j j k                       # move past the end and back
 tmux send-keys -t "$D" 1                             # idle agents get no prompt keys
 until_screen "not waiting: key not sent" "digit was not refused for an idle agent"
@@ -86,6 +92,8 @@ until_screen "$S · 3 agents" "ESC [ + arrow crashed the dashboard"
 # a waiting agent: badge, prompt keys, double-tap guard, messages skip it
 echo waiting > "$FAKE/status/$(pid_of 3.1)"
 until_screen "1 NEED YOU" "waiting agent not shown"
+[ "$(tmux show -t "$SID" -v @claude_queue | cut -d' ' -f1)" = "$(tmux display -p -t "$SID:3.1" '#{pane_id}')" ] ||
+  fail "the waiting agent is not first in @claude_queue"
 [ "$(tmux show -t "$SID" -v @claude_need)" = 1 ] || fail "badge option @claude_need not 1"
 tmux send-keys -t "$D" Tab; sleep 0.4; tmux send-keys -t "$D" 1   # Tab selects the waiting agent
 on_pane 3.1 "1" "digit did not reach the waiting agent"
@@ -117,6 +125,7 @@ until_screen "1 NEED YOU" "1.1 not shown waiting"
 [ "$(tmux show -t "$SID" -v @claude_need 2>/dev/null)" = 1 ] || fail "badge not set before SIGTERM"
 kill -TERM "$(tmux display -p -t "$D" '#{pane_pid}')"; sleep 1.5
 [ -z "$(tmux show -t "$SID" -v @claude_need 2>/dev/null)" ] || fail "SIGTERM left the badge set"
+[ -z "$(tmux show -t "$SID" -v @claude_queue 2>/dev/null)" ] || fail "SIGTERM left @claude_queue set"
 
 # a dashboard watching another session exits when that session dies
 SID2=$(tmux new-session -d -P -F '#{session_id}' -s dashwatch -x 100 -y 20 "sleep 60")

@@ -12,6 +12,8 @@ run-shell cannot host it (no tty).
 Toggle it like NERDTree: one key goes to the dash window, pinned as the first window (opened if
 missing), and from there back to the window you came from (tmux.conf):
     bind A run-shell '/exports/para-lipg-hpc/mdmanurung/lucid-dashboard/claude_dash.py --toggle #{window_id}'
+and jump from any pane to the next agent that needs you, while a dashboard runs:
+    bind Tab run-shell '/exports/para-lipg-hpc/mdmanurung/lucid-dashboard/claude_dash.py --next #{pane_id}'
 
 Keys
     j/k, arrows   select agent          Enter   jump to its pane
@@ -180,7 +182,7 @@ class Poller(threading.Thread):
     def __init__(self, session, me, agents):
         super().__init__()
         self.session, self.me, self.agents = session, me, agents
-        self.want, self.wake, self.need = None, threading.Event(), None
+        self.want, self.wake, self.need, self.queue = None, threading.Event(), None, None
 
     def run(self):
         while True:
@@ -204,6 +206,10 @@ class Poller(threading.Thread):
             # ponytail: one dashboard per session; a second one's exit clears the badge until next change
             sh("tmux", "set", "-t", self.session, *(["@claude_need", str(need)] if need else ["-u", "@claude_need"]))
             self.need = need
+        queue = " ".join(r["id"] for r in self.rows if r["status"] in ("waiting", "idle"))  # in list order
+        if queue != self.queue:  # prefix Tab (--next) reads it to jump to the next agent that needs you
+            sh("tmux", "set", "-t", self.session, *(["@claude_queue", queue] if queue else ["-u", "@claude_queue"]))
+            self.queue = queue
 
 
 def panes(session, me, agents):
@@ -265,6 +271,28 @@ def toggle(here):
         sh("tmux", "select-window", "-t", dash)
     elif wins:
         sh("tmux", "new-window", "-b", "-t", next(iter(wins)), "-n", "dash", os.path.realpath(__file__))
+
+
+def jump_next(here):
+    """prefix Tab: from any pane, go to the next agent that needs you, waiting ones first, then idle.
+    Reads @claude_queue, which a running dashboard keeps current; `here` is a pane id."""
+    session = sh("tmux", "display", "-p", "-t", here, "#{session_id}").strip()
+    queue = sh("tmux", "show", "-t", session, "-v", "@claude_queue").split()
+    if not queue:
+        sh("tmux", "display-message", "-t", here, "no agent needs you (or claude-dash is not running)")
+        return
+    nxt = queue[(queue.index(here) + 1) % len(queue)] if here in queue else queue[0]
+    sh("tmux", "select-window", "-t", nxt)
+    sh("tmux", "select-pane", "-t", nxt)
+
+
+def back_key(keys, prefix):
+    """The key that returns to the dashboard, from `tmux list-keys -T prefix`: the --toggle binding,
+    else a plain last-window one; "" if neither."""
+    bound = [m.groups() for m in re.finditer(r"^bind-key\s+(?:-r\s+)?-T prefix\s+(\S+)\s+(.*)$", keys, re.M)]
+    key = next((k for k, cmd in bound if "--toggle" in cmd), None) or \
+        next((k for k, cmd in bound if cmd.strip() == "last-window"), None)
+    return "%s %s" % (prefix, re.sub(r"\\(.)", r"\1", key)) if key else ""  # list-keys shows # as \#
 
 
 def next_needing(rows, sel):
@@ -515,7 +543,9 @@ def main(scr):
     session, _, start_name = sh("tmux", "display", "-p", *where, "#{session_id}\t#{session_name}").strip().partition("\t")
     if not session:  # e.g. /usr/bin/tmux 2.7 first on PATH cannot talk to a 3.7b server
         sys.exit("claude-dash: 'tmux display' failed; tmux on PATH is %s" % shutil.which("tmux"))
-    atexit.register(sh, "tmux", "set", "-t", session, "-u", "@claude_need")  # no stale badge after exit
+    for opt in ("@claude_need", "@claude_queue"):  # no stale badge or queue after exit
+        atexit.register(sh, "tmux", "set", "-t", session, "-u", opt)
+    back = back_key(sh("tmux", "list-keys", "-T", "prefix"), sh("tmux", "show", "-gv", "prefix").strip())
     # the dash window always sits first in its own session (maybe not the watched one), where
     # prefix A and window 1 find it
     win, home, wname = (sh("tmux", "display", "-p", "-t", me, "#{window_id}\t#{session_id}\t#{window_name}")
@@ -689,6 +719,8 @@ def main(scr):
         if code in (10, 13, curses.KEY_ENTER):
             sh("tmux", "select-window", "-t", r["id"])
             sh("tmux", "select-pane", "-t", r["id"])
+            if back:  # say how to come back: the dashboard is out of sight now
+                sh("tmux", "display-message", "-d", "2500", "-t", r["id"], "%s: back to claude-dash" % back)
             if popup:  # leave, so the popup closes and the jump is visible
                 return
         elif ch in ("i", "r") and waiting:
@@ -720,6 +752,8 @@ if __name__ == "__main__":
         sys.exit(__doc__)
     if sys.argv[1:2] == ["--toggle"]:  # from run-shell: no tty and no pane, so the binding passes the window
         sys.exit(toggle(sys.argv[2]))
+    if sys.argv[1:2] == ["--next"]:
+        sys.exit(jump_next(sys.argv[2]))
     if not os.environ.get("TMUX"):
         sys.exit("claude-dash: run inside tmux, e.g. tmux new-window -S -n dash %s" % sys.argv[0])
     os.environ.setdefault("ESCDELAY", "25")  # Esc clears the filter without a 1 s lag

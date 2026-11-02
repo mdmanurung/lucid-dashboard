@@ -62,3 +62,13 @@ assert assign([{"pid": 30, "startedAt": None}, {"pid": 40, "startedAt": 2}], tre
 assert cells("ab") == 2 and cells("日本") == 4                                # wide glyphs take two cells
 assert cells(fit_end("日本語" * 20, 11)) <= 11 and fit_end("日本語" * 20, 11).startswith("…")
 print("ok hardening")
+
+from claude_dash import back_key
+keys = """bind-key    -T prefix a       last-window
+bind-key -r -T prefix l       select-pane -R
+bind-key    -T prefix A       run-shell "/x/claude_dash.py --toggle #{window_id}"
+"""
+assert back_key(keys, "C-a") == "C-a A"                                      # the toggle wins
+assert back_key(keys.replace("--toggle", "--other"), "C-a") == "C-a a"       # else last-window
+assert back_key("bind-key    -T prefix \\# list-buffers\n", "C-b") == ""     # neither: no hint
+print("ok back key")
