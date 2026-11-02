@@ -23,15 +23,16 @@ while read -r pid cmd target; do
 done | paste -sd, | sed 's/^/[/; s/$/]/'
 SHIM
 chmod +x "$FAKE/shim/claude"
-SID=""; SID2=""                        # target sessions by $id: "-t =dash.selftest" is parsed as a window
-trap 'for s in $SID $SID2; do tmux kill-session -t "$s" 2>/dev/null; done; rm -rf "$FAKE"' EXIT
+SID=""; SID2=""; SID3=""               # target sessions by $id: "-t =dash.selftest" is parsed as a window
+trap 'for s in $SID $SID2 $SID3; do tmux kill-session -t "$s" 2>/dev/null; done; rm -rf "$FAKE"' EXIT
 
 fail() { echo "FAIL: $1"; tmux capture-pane -p -t "$D" 2>/dev/null | head -12; exit 1; }
 until_screen() { for _ in $(seq 40); do tmux capture-pane -p -t "$D" | grep -qF -- "$1" && return 0; sleep 0.25; done; fail "$2"; }
 on_pane() { for _ in $(seq 20); do tmux capture-pane -p -t "$SID:$1" | grep -qF -- "$2" && return 0; sleep 0.25; done; fail "$3"; }
 pid_of() { tmux display -p -t "$SID:$1" '#{pane_pid}'; }
 # session ids start with "$": quote them, or the pane's shell expands "$70" to "$7" "0" (session 0!)
-dash() { tmux new-window -d -P -F '#{pane_id}' -t "$1:" -n dash \
+# window "board", not "dash": a dash window pins itself first and would shift every target below
+dash() { tmux new-window -d -P -F '#{pane_id}' -t "$1:" -n board \
   "env PATH=$FAKE/shim:\$PATH DASH_SID='$SID' FAKE=$FAKE $DASH '$2'"; }
 
 SID=$(tmux new-session -d -P -F '#{session_id}' -s "$S" -x 120 -y 30 "$FAKE/bin/claude 1000")
@@ -106,8 +107,8 @@ sleep 1; until_screen "4 agents" "kill went ahead without y"
 tmux send-keys -t "$D" X; sleep 0.5; tmux send-keys -t "$D" y Enter
 until_screen "3 agents" "X then y did not kill a pane"
 
-tmux resize-window -t "$SID:dash" -x 40 -y 6; sleep 1   # tiny terminal must not crash
-tmux resize-window -t "$SID:dash" -x 120 -y 30
+tmux resize-window -t "$SID:board" -x 40 -y 6; sleep 1   # tiny terminal must not crash
+tmux resize-window -t "$SID:board" -x 120 -y 30
 until_screen "3 agents" "dashboard died after resize"
 
 # SIGTERM (a closed pane or popup) must still clear the badge
@@ -124,4 +125,28 @@ until_screen "$S · 3 agents" "dashboard given a session id did not watch it"
 tmux kill-session -t "$SID"; SID=""
 for _ in $(seq 20); do tmux list-panes -t "$D" >/dev/null 2>&1 || break; sleep 0.25; done
 tmux list-panes -t "$D" >/dev/null 2>&1 && fail "dashboard kept running after its session died"
+
+# --toggle (prefix A): opens the dash window first, goes back, keeps indices contiguous, re-pins
+SID3=$(tmux new-session -d -P -F '#{session_id}' -s dashtoggle -x 100 -y 20 -n a "sleep 600")
+tmux new-window -d -t "$SID3:" -n b "sleep 600"; tmux new-window -t "$SID3:" -n c "sleep 600"
+D="$SID3:"
+order() { tmux list-windows -t "$SID3" -F '#W' | paste -sd' '; }
+active() { tmux display -p -t "$SID3:" '#W'; }
+# through run-shell, as the binding does: its formats and its sh quoting both count
+toggle() { tmux run-shell -t "$SID3:" "$DASH --toggle #{window_id}"; sleep 0.5; }
+contiguous() { tmux list-windows -t "$SID3" -F '#I' | awk 'NR>1 && $1!=p+1{bad=1}{p=$1}END{exit bad}'; }
+toggle; [ "$(order)" = "dash a b c" ] && [ "$(active)" = dash ] || fail "toggle did not open dash first: $(order)"
+toggle; [ "$(active)" = c ] || fail "toggle from dash did not go back to c"
+toggle; [ "$(active)" = dash ] && [ "$(order)" = "dash a b c" ] || fail "toggle did not return to the dash window"
+contiguous || fail "toggle on a first dash left a gap in the window indices"
+tmux move-window -s "$(tmux list-windows -t "$SID3" -F '#{window_id}' | head -1)" -t "$SID3:99"
+tmux select-window -t "$SID3:=a"
+toggle; [ "$(order)" = "dash a b c" ] && [ "$(active)" = dash ] || fail "toggle did not re-pin a moved dash: $(order)"
+tmux swap-window -s "$SID3:=dash" -t "$SID3:=b"; tmux select-window -t "$SID3:=c"   # dash in the middle
+toggle; [ "$(order)" = "dash b a c" ] || fail "toggle did not re-pin a dash from the middle: $(order)"
+if [ "$(tmux show -gv renumber-windows)" = on ] && ! contiguous; then fail "pinning from the middle left a gap"; fi
+tmux kill-window -t "$SID3:=dash"                    # a dash window opened at the end pins itself first
+tmux new-window -t "$SID3:" -n dash "$DASH"
+for _ in $(seq 20); do [ "$(order)" = "dash b a c" ] && break; sleep 0.25; done
+[ "$(order)" = "dash b a c" ] || fail "a new dash window did not pin itself first: $(order)"
 echo ok

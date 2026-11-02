@@ -9,6 +9,10 @@ session, so pass the client; display-popup does not expand formats, run-shell do
 An argument may also be a session target, e.g. claude_dash.py '$3'.
 run-shell cannot host it (no tty).
 
+Toggle it like NERDTree: one key goes to the dash window, pinned as the first window (opened if
+missing), and from there back to the window you came from (tmux.conf):
+    bind A run-shell '/exports/para-lipg-hpc/mdmanurung/lucid-dashboard/claude_dash.py --toggle #{window_id}'
+
 Keys
     j/k, arrows   select agent          Enter   jump to its pane
     i             reply in a box (Alt-Enter or a paste adds lines) 0-9 y n answer a waiting prompt
@@ -233,6 +237,34 @@ def panes(session, me, agents):
         del SEEN[gone]
     return sorted(out, key=lambda r: (RANK.get(r["status"], 1),
                                       tuple(int(n) for n in r["target"].split("."))))
+
+
+def pin(win, first):
+    """Move window `win` in front of window `first`; moving the first window before itself leaves a gap."""
+    if win != first:
+        sh("tmux", "move-window", "-b", "-s", win, "-t", first)
+        # -b shifts every later window up, leaving a hole where `win` was; renumber-windows does not fill it
+        if sh("tmux", "display", "-p", "-t", first, "#{renumber-windows}").strip() == "1":  # formats give 1, not on
+            sh("tmux", "move-window", "-r", "-t", first)
+
+
+def toggle(here):
+    """prefix A, like NERDTree: in the dash window, go back to the last window; elsewhere, go to the
+    dash window, pinned as the session's first window and opened there if missing. `here` is a
+    window id: a session id starts with "$", which run-shell's sh would expand."""
+    session = sh("tmux", "display", "-p", "-t", here, "#{session_id}").strip()
+    wins = dict(l.split("\t", 1) for l in  # window id -> name, in index order
+                sh("tmux", "list-windows", "-t", session, "-F", "#{window_id}\t#{window_name}").splitlines())
+    dash = next((w for w, name in wins.items() if name == "dash"), None)
+    if dash == here:
+        sh("tmux", "last-window", "-t", session)
+        if sh("tmux", "display", "-p", "-t", session, "#{window_id}").strip() == here:  # no last window yet
+            sh("tmux", "select-window", "-t", session + ":+")
+    elif dash:
+        pin(dash, next(iter(wins)))
+        sh("tmux", "select-window", "-t", dash)
+    elif wins:
+        sh("tmux", "new-window", "-b", "-t", next(iter(wins)), "-n", "dash", os.path.realpath(__file__))
 
 
 def next_needing(rows, sel):
@@ -484,6 +516,12 @@ def main(scr):
     if not session:  # e.g. /usr/bin/tmux 2.7 first on PATH cannot talk to a 3.7b server
         sys.exit("claude-dash: 'tmux display' failed; tmux on PATH is %s" % shutil.which("tmux"))
     atexit.register(sh, "tmux", "set", "-t", session, "-u", "@claude_need")  # no stale badge after exit
+    # the dash window always sits first in its own session (maybe not the watched one), where
+    # prefix A and window 1 find it
+    win, home, wname = (sh("tmux", "display", "-p", "-t", me, "#{window_id}\t#{session_id}\t#{window_name}")
+                        .strip() + "\t\t").split("\t")[:3]
+    if me and wname == "dash":
+        pin(win, sh("tmux", "list-windows", "-t", home, "-F", "#{window_id}").split()[0])
     sys.stdout.write("\033[?2004h")  # bracketed paste: a pasted newline must not send the message
     sys.stdout.flush()
     atexit.register(lambda: (sys.stdout.write("\033[?2004l"), sys.stdout.flush()))
@@ -680,6 +718,8 @@ def main(scr):
 if __name__ == "__main__":
     if sys.argv[1:2] in (["-h"], ["--help"]):
         sys.exit(__doc__)
+    if sys.argv[1:2] == ["--toggle"]:  # from run-shell: no tty and no pane, so the binding passes the window
+        sys.exit(toggle(sys.argv[2]))
     if not os.environ.get("TMUX"):
         sys.exit("claude-dash: run inside tmux, e.g. tmux new-window -S -n dash %s" % sys.argv[0])
     os.environ.setdefault("ESCDELAY", "25")  # Esc clears the filter without a 1 s lag
