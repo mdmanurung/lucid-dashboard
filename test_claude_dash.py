@@ -45,3 +45,10 @@ many = box_body(dict(buf="\n".join("l%d" % i for i in range(6))), 40)
 assert len(many) == BOX_LINES and many[0].startswith("… ") and many[-1] == "  l5█"   # older lines scroll out
 assert box_body(dict(buf="x" * 50), 10)[0].startswith("…")                   # long line keeps its end
 print("ok box")
+
+import claude_dash, os, tempfile
+claude_dash.REPLIES_FILE = os.path.join(tempfile.mkdtemp(), "replies.txt")
+assert claude_dash.quick_replies() == claude_dash.QUICK_REPLIES[:9]          # no file: built-in replies
+open(claude_dash.REPLIES_FILE, "w").write("# mine\nship it\n\n  rebase on main  \n")
+assert claude_dash.quick_replies() == ["ship it", "rebase on main"]          # comments and blanks skipped
+print("ok replies")

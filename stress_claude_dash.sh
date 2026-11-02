@@ -34,9 +34,11 @@ tmux send-keys -t "$D" -l "hello all"; tmux send-keys -t "$D" Enter
 until_screen "sent to 3 agents" "I did not report sending to 3 agents"
 on_pane 3.1 "hello all" "I did not reach pane 3.1"
 
-tmux send-keys -t "$D" r; sleep 0.4; tmux send-keys -t "$D" 1   # quick reply 1 = "continue" to 2.1
-until_screen "sent to 1 agent" "r 1 did not report a quick reply"
-on_pane 2.1 "continue" "quick reply did not reach pane 2.1"
+tmux send-keys -t "$D" r; sleep 0.4; tmux send-keys -t "$D" 1   # reply 1 = "continue" prefills the box
+until_screen "❯ continue█" "r 1 did not prefill the box"
+tmux capture-pane -p -t "$SID:2.1" | grep -q "continue" && fail "prefilled reply sent before Enter"
+tmux send-keys -t "$D" -l " please"; tmux send-keys -t "$D" Enter   # edit it, then send
+on_pane 2.1 "continue please" "edited prefilled reply did not reach pane 2.1"
 
 tmux send-keys -t "$D" i; sleep 0.4                  # a bracketed paste with a newline stays in the box
 tmux set-buffer -b dashstress "line one

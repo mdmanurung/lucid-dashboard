@@ -13,7 +13,9 @@ Keys
     j/k, arrows   select agent          Enter   jump to its pane
     i             reply in a box (Alt-Enter or a paste adds lines) 0-9 y n answer a waiting prompt
     I             message every listed agent (filter first to pick a group)
-    r / R         quick reply (QUICK_REPLIES below) to the selected / every listed agent
+    r / R         prefilled reply to the selected / every listed agent: pick 1-9, edit, Enter sends.
+                  Replies come from ~/.config/claude-dash/replies.txt (one per line, # comments),
+                  re-read each time; without that file, QUICK_REPLIES below.
     Space         Enter on a waiting prompt
     e             send Esc (interrupt)  N       new claude window
     X             kill pane (asks)      q       quit
@@ -27,8 +29,8 @@ import atexit
 import collections
 import curses
 import json
-import shutil
 import os
+import shutil
 import re
 import subprocess
 import sys
@@ -37,7 +39,8 @@ import time
 
 RANK = {"waiting": 0, "?": 1, "idle": 2, "shell": 3, "busy": 3}
 LABEL = {"waiting": "NEEDS YOU", "idle": "● idle", "busy": "◐ busy", "shell": "◌ shell", "?": "○ ?"}
-# r / R then a number sends one of these; edit to taste (at most 9)
+REPLIES_FILE = os.path.expanduser("~/.config/claude-dash/replies.txt")  # your own replies, one per line
+# r / R then a number puts one of these in the message box; used when REPLIES_FILE is missing or empty
 QUICK_REPLIES = ["continue", "yes, go ahead", "run the tests and report what fails",
                  "commit this with a clear message", "stop and summarise where you are and what is left"]
 KEYS = [("Tab", "next"), ("i", "reply"), ("I", "all"), ("r", "quick"), ("/", "filter"), ("0-9 y n ␣", "answer"),
@@ -60,7 +63,6 @@ PALETTE = {
     "hot": (210, -1, curses.COLOR_RED, -1),                          # context nearly full
 }
 EDIT_KEYS = [("⏎", "send"), ("Alt-⏎", "new line"), ("Esc", "cancel"), ("Ctrl-U", "clear")]
-QUICK_KEYS = [("1-%d" % len(QUICK_REPLIES), "send"), ("Esc", "cancel")]
 BOX_LINES = 4  # message lines shown in the box; older lines scroll out of view
 COL = {}  # name -> curses attribute, filled once curses has started
 SEEN = {}  # pane id -> (time read, progress line, context %)
@@ -248,10 +250,20 @@ def escape(scr):
         scr.timeout(150)
 
 
+def quick_replies():
+    """Replies for the r / R menu: REPLIES_FILE if it has any, else QUICK_REPLIES; at most 9."""
+    try:
+        with open(REPLIES_FILE) as f:
+            mine = [l.strip() for l in f if l.strip() and not l.lstrip().startswith("#")]
+    except OSError:
+        mine = []
+    return (mine or QUICK_REPLIES)[:9]
+
+
 def box_body(edit, room):
     """Lines inside the message box: the quick-reply menu, or the last BOX_LINES of the message."""
     if edit.get("quick"):
-        return ["%d  %s" % (i, q) for i, q in enumerate(QUICK_REPLIES, 1)]
+        return ["%d  %s" % (i, q[:room - 3]) for i, q in enumerate(edit["replies"], 1)]
     lines = edit["buf"].split("\n")
     shown = lines[-BOX_LINES:]
     out = [("❯ " if j == 0 and len(lines) <= BOX_LINES else "… " if j == 0 else "  ") + l
@@ -360,7 +372,8 @@ def draw(scr, name, rows, sel, note, err, counts, edit, preview):
             put(scr, j, 1, (" " + line).ljust(w - 3), c["input"] | B)
             put(scr, j, w - 2, "│", c["accent"])
         put(scr, h - 2, 0, "╰" + "─" * (w - 3) + "╯", c["accent"])
-        hints(scr, h - 1, QUICK_KEYS if edit.get("quick") else EDIT_KEYS)
+        hints(scr, h - 1, [("1-%d" % len(edit["replies"]), "prefill the box"), ("Esc", "cancel")]
+              if edit.get("quick") else EDIT_KEYS)
     elif note:
         put(scr, h - 1, put(scr, h - 1, 0, " ● ", c["busy"] | B), note, c["busy"])
     else:
@@ -452,8 +465,9 @@ def main(scr):
         if edit and edit.get("quick"):
             if code == 27:
                 edit = None
-            elif ch in "123456789" and ch and int(ch) <= len(QUICK_REPLIES):
-                note, edit = deliver(QUICK_REPLIES[int(ch) - 1], edit["to"]), None
+            elif ch in "123456789" and ch and int(ch) <= len(edit["replies"]):
+                # prefill, do not send: you can edit it, Enter sends as usual
+                edit = dict(title=edit["then"], buf=edit["replies"][int(ch) - 1], to=edit["to"])
             continue
         if edit and code not in (curses.KEY_UP, curses.KEY_DOWN):
             enter = code in (10, 13, curses.KEY_ENTER)
@@ -505,8 +519,9 @@ def main(scr):
             edit = dict(title="message all %d listed agents" % len(rows), buf="", to=[r["id"] for r in rows])
             continue
         if ch == "R" and rows:
-            edit = dict(title="quick reply to all %d listed agents" % len(rows), buf="",
-                        to=[r["id"] for r in rows], quick=True)
+            edit = dict(title="pick a reply for all %d listed agents" % len(rows), buf="", quick=True,
+                        then="message all %d listed agents" % len(rows), to=[r["id"] for r in rows],
+                        replies=quick_replies())
             continue
         if not rows:
             continue
@@ -520,8 +535,9 @@ def main(scr):
         elif ch in ("i", "r") and waiting:
             note = "%s is waiting on a dialog: answer with 0-9/y/n/Space first" % r["target"]
         elif ch == "r":
-            edit = dict(title="quick reply to %s · %s" % (r["target"], r["name"] or r["window"]), buf="",
-                        to=[r["id"]], quick=True)
+            who = "%s · %s" % (r["target"], r["name"] or r["window"])
+            edit = dict(title="pick a reply for " + who, buf="", quick=True, then="reply to " + who,
+                        to=[r["id"]], replies=quick_replies())
         elif ch == "i":  # typed in the footer, so its screen stays visible in the preview
             edit = dict(title="reply to %s · %s" % (r["target"], r["name"] or r["window"]), buf="", to=[r["id"]])
         elif ch and ch in "0123456789yn " and not waiting:
