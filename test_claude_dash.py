@@ -52,3 +52,13 @@ assert claude_dash.quick_replies() == claude_dash.QUICK_REPLIES[:9]          # n
 open(claude_dash.REPLIES_FILE, "w").write("# mine\nship it\n\n  rebase on main  \n")
 assert claude_dash.quick_replies() == ["ship it", "rebase on main"]          # comments and blanks skipped
 print("ok replies")
+
+from claude_dash import cells, fit_end
+assert ctx("log says ctx: 99%\n" + "x\n" * 5 + "| ctx: 12%\n") == 12          # agent output cannot fake it
+assert ctx("ctx: 97% printed by the agent\n" + "line\n" * 6) is None         # only the bottom lines count
+open(claude_dash.REPLIES_FILE, "wb").write(b"ok\n\xff bad\n")
+assert claude_dash.quick_replies()[0] == "ok"                                # a bad byte is not a crash
+assert assign([{"pid": 30, "startedAt": None}, {"pid": 40, "startedAt": 2}], tree, {10})[10]["pid"] == 30
+assert cells("ab") == 2 and cells("日本") == 4                                # wide glyphs take two cells
+assert cells(fit_end("日本語" * 20, 11)) <= 11 and fit_end("日本語" * 20, 11).startswith("…")
+print("ok hardening")

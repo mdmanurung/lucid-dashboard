@@ -2,7 +2,13 @@
 
 A tmux dashboard for Claude Code. You run it in one pane, and it lists every Claude Code agent in the same tmux session. For each one it shows the live status, how long it has been in that state, its context use and its latest step. From the dashboard you can reply, answer prompts, jump to an agent, spawn one or kill one, so you never have to click through panes one at a time.
 
-![claude-dash watching five agents: one waits on a permission prompt (red row), one is idle, three are busy, with a live preview of the selected agent](docs/screenshot.svg)
+![claude-dash on a dark terminal, watching five agents: one waits on a permission prompt (red row), one is idle, three are busy, with a live preview of the selected agent](docs/screenshot.svg)
+
+<details><summary>On a light terminal</summary>
+
+![claude-dash on a light terminal: the same five agents in the light palette](docs/screenshot-light.svg)
+
+</details>
 
 An agent waiting on you gets a full-width red row, a red `N NEED YOU` badge appears in the header, and the terminal bell rings.
 
@@ -48,7 +54,7 @@ A popup has no pane of its own, so the binding passes the client name. `display-
 | `I` | message every listed agent; filter first to pick a group |
 | `r` / `R` | prefilled reply to the selected / every listed agent: pick 1-9, edit it, `Enter` sends |
 | `0`-`9` `y` `n` `Space` | answer a waiting prompt (`Space` sends Enter) |
-| `e` | send Esc to interrupt the agent |
+| `e` | send Esc: interrupts a busy agent, cancels a waiting agent's dialog |
 | `/` | filter by any words; `Enter` jumps to the top match, `Esc` clears |
 | `N` | open a new Claude window in a directory you choose |
 | `X` | kill the pane, after a `y/N` confirmation |
@@ -56,9 +62,14 @@ A popup has no pane of its own, so the binding passes the client name. `display-
 
 The dashboard has safety rules for keys sent to agents:
 
-- Prompt keys only go to agents that are **waiting**, because a stray `1` would otherwise land in a busy agent's prompt.
-- Messages skip waiting agents, because `Enter` would accept the open dialog.
-- The selection follows the agent, not the row, so a re-sort can't send your key to a different agent.
+- Prompt keys only go to agents shown as **waiting**, because a stray `1` would otherwise land in a busy agent's prompt.
+- The same prompt key twice within 1.5 s is refused, because the next dialog may not be on screen yet.
+- Messages only go to agents shown as **idle** or **busy**. A waiting agent would take `Enter` as "accept", and an unknown (`?`) one might be waiting.
+- The selection follows the agent, not the row, so a re-sort can't send your key to a different agent. While a reply box is open, the arrow keys can't change the selection.
+- The preview only ever shows the selected agent's screen.
+- Alt+key, unknown escape sequences and pasted text never run as dashboard commands.
+
+Statuses come from `claude agents --json` every 5 s, so a status can be up to about 6 s old. Check the preview before answering a dialog.
 
 ## Prefilled replies
 
@@ -73,7 +84,11 @@ stop and summarise where you are, what is done and what is left
 
 The file is re-read every time you open the menu. Without it, the built-in `QUICK_REPLIES` in `claude_dash.py` are used.
 
-## Status-bar badge and theme
+## Light and dark terminals
+
+The dashboard picks its light or dark palette from tmux's `#{client_theme}`. Set `CLAUDE_DASH_THEME=light` or `dark` to override it. Both palettes keep text contrast near or above 4.5:1. On an 8-colour terminal, the dashboard falls back to plain colours.
+
+## Status-bar badge and tmux theme
 
 While the dashboard runs, the session option `@claude_need` holds the number of waiting agents. Show it in any status line with:
 
@@ -81,7 +96,7 @@ While the dashboard runs, the session option `@claude_need` holds the number of 
 #{?@claude_need,#{@claude_need} NEED YOU,}
 ```
 
-`tmux-modern.conf` is an optional Tokyo Night theme that shows this as a red badge. It also adds pane-border labels with each agent's task name and rounded popups. To try it live, or to keep it, add this line to `~/.tmux.conf` above any TPM lines:
+`tmux-modern.conf` is an optional theme that works on light and dark terminals and shows this as a red badge. It also adds pane-border labels with each agent's task name and rounded popups. To try it live, or to keep it, add this line to `~/.tmux.conf` above any TPM lines:
 
 ```sh
 tmux source-file /path/to/tmux-modern.conf
@@ -100,14 +115,16 @@ A background thread does every tmux read, so keypresses never wait on a subproce
 
 ```sh
 python3.11 test_claude_dash.py   # pure functions: pane mapping, parsing, filter, message box, replies
-bash stress_claude_dash.sh       # end to end in a throwaway tmux session with fake agents
+bash stress_claude_dash.sh       # end to end in throwaway tmux sessions with fake agents
 ```
 
-The stress test never touches your other sessions.
+The stress test drives the dashboard against fake agents whose status it controls. It covers replies, broadcasts, prompt keys and the double-tap guard. It also checks that adversarial input (Alt+key, pastes into menus, broken escape sequences) runs nothing, that a pane with a newline in its path doesn't freeze the list, and that SIGTERM clears the badge. It never touches your other sessions.
 
 ## Limits
 
 - `run-shell` cannot host the dashboard, because it has no tty.
 - Without bracketed paste in your terminal, a pasted newline sends the message early.
 - With two dashboards on one session, closing one clears the badge until the next status change.
+- Agents inside `ssh` or `docker` in a pane are not listed: only local `claude` processes are.
+- With two Claude processes in one pane, the outer (older) one's status is shown.
 - The `CTX` column needs a status line that prints `ctx: N%`.
